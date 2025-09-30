@@ -156,249 +156,248 @@
 
     // pass 0: apply external forces (gravity for now)
     const applyExtForceWGSL = `
-    struct Params {
-    a : vec4<f32>, // a.x=dt, a.y=gx, a.z=gy, a.w=dt_sqr
-    b : vec4<f32>, // b.x=h, b.y=rho0, b.z=k, b.w=k_near
-    c : vec4<f32>, // c.x=count, c.y=SCALE
-    };
-
-    @group(0) @binding(0) var<uniform> params : Params;
-
-    struct Particle { x : f32, y : f32, vx : f32, vy : f32, pX : f32, pY : f32, pad0 : f32, pad1 : f32 };
-    @group(0) @binding(1) var<storage, read_write> particles : array<Particle>;
-
-    @compute @workgroup_size(${workgroupSize})
-    fn main(@builtin(global_invocation_id) id : vec3<u32>) {
-    let i = id.x;
-    let count = u32(params.c.x);
-    if (i >= count) { return; }
-    let dt = params.a.x;
-    let gy = params.a.z;
-    particles[i].vy = particles[i].vy + gy * dt;
-    }
+      struct Params {
+      a : vec4<f32>, // a.x=dt, a.y=gx, a.z=gy, a.w=dt_sqr
+      b : vec4<f32>, // b.x=h, b.y=rho0, b.z=k, b.w=k_near
+      c : vec4<f32>, // c.x=count, c.y=SCALE
+      };
+  
+      @group(0) @binding(0) var<uniform> params : Params;
+  
+      struct Particle { x : f32, y : f32, vx : f32, vy : f32, pX : f32, pY : f32, pad0 : f32, pad1 : f32 };
+      @group(0) @binding(1) var<storage, read_write> particles : array<Particle>;
+  
+      @compute @workgroup_size(${workgroupSize})
+      fn main(@builtin(global_invocation_id) id : vec3<u32>) {
+      let i = id.x;
+      let count = u32(params.c.x);
+      if (i >= count) { return; }
+      let dt = params.a.x;
+      let gy = params.a.z;
+      particles[i].vy = particles[i].vy + gy * dt;
+      }
     `;
 
     // pass 1: predict particles position
     const predPosWGSL = `
-    struct Params { a : vec4<f32>, b : vec4<f32>, c : vec4<f32> };
-    @group(0) @binding(0) var<uniform> params : Params;
-
-    struct Particle { x : f32, y : f32, vx : f32, vy : f32, pX : f32, pY : f32, pad0 : f32, pad1 : f32 };
-    @group(0) @binding(1) var<storage, read_write> particles : array<Particle>;
-
-    @compute @workgroup_size(${workgroupSize})
-    fn main(@builtin(global_invocation_id) id : vec3<u32>) {
-    let i = id.x;
-    let count = u32(params.c.x);
-    if (i >= count) { return; }
-    let dt = params.a.x;
-    particles[i].pX = particles[i].x;
-    particles[i].pY = particles[i].y;
-    particles[i].x = particles[i].x + particles[i].vx * dt;
-    particles[i].y = particles[i].y + particles[i].vy * dt;
-    }
+      struct Params { a : vec4<f32>, b : vec4<f32>, c : vec4<f32> };
+      @group(0) @binding(0) var<uniform> params : Params;
+  
+      struct Particle { x : f32, y : f32, vx : f32, vy : f32, pX : f32, pY : f32, pad0 : f32, pad1 : f32 };
+      @group(0) @binding(1) var<storage, read_write> particles : array<Particle>;
+  
+      @compute @workgroup_size(${workgroupSize})
+      fn main(@builtin(global_invocation_id) id : vec3<u32>) {
+      let i = id.x;
+      let count = u32(params.c.x);
+      if (i >= count) { return; }
+      let dt = params.a.x;
+      particles[i].pX = particles[i].x;
+      particles[i].pY = particles[i].y;
+      particles[i].x = particles[i].x + particles[i].vx * dt;
+      particles[i].y = particles[i].y + particles[i].vy * dt;
+      }
     `;
 
     // enforce incompressibility by performing double-density relaxation
     const relaxDensityWGSL = `
-    struct Params { a : vec4<f32>, b : vec4<f32>, c : vec4<f32> };
-    @group(0) @binding(0) var<uniform> params : Params;
-
-    struct Particle { x : f32, y : f32, vx : f32, vy : f32, pX : f32, pY : f32, pad0 : f32, pad1 : f32 };
-    @group(0) @binding(1) var<storage, read> particles : array<Particle>;
-
-    struct Disp { dx : atomic<i32>, dy : atomic<i32> };
-    @group(0) @binding(2) var<storage, read_write> disp : array<Disp>;
-
-    // truncate float->i32 fixed-point conversion
-    fn toFixed(v: f32, scale: f32) -> i32 {
-    return i32(v * scale);
-    }
-
-    // optional clamp helper to avoid insanely large D_term contributions
-    fn clampD(v: f32, maxVal: f32) -> f32 {
-    return clamp(v, -maxVal, maxVal);
-    }
-
-    @compute @workgroup_size(256)
-    fn main(@builtin(global_invocation_id) id : vec3<u32>) {
-    let i = id.x;
-    let count = u32(params.c.x);
-    if (i >= count) { return; }
-
-    let px = particles[i].x;
-    let py = particles[i].y;
-
-    let h = params.b.x;
-    let k = params.b.z;
-    let k_near = params.b.w;
-    let dt_sqr = params.a.w;
-    let rho0 = params.b.y;
-    let SCALE = params.c.y;
-
-    let h2 = h * h;
-    // clamp per-pair D_term magnitude to avoid overflow (in world units)
-    let maxD = 0.5 * h; // reasonable limit for single-pair D_term
-
-    for (var j: u32 = 0u; j < count; j = j + 1u) {
-        if (j == i) { continue; }
-
-        let qx = particles[j].x;
-        let qy = particles[j].y;
-
-        let rx = qx - px; // i -> j
-        let ry = qy - py;
-        let dist2 = rx*rx + ry*ry;
-
-        if (dist2 < h2 && dist2 > 1e-10) {
-        // use inverseSqrt + multiply to avoid explicit sqrt()
-        let invDist = inverseSqrt(dist2);    // 1 / sqrt(dist2)
-        let dist = dist2 * invDist;          // sqrt(dist2) == dist2 * (1/sqrt(dist2))
-        let q = dist / h;
-        let one_minus_q = 1.0 - q;
-
-        let density = one_minus_q * one_minus_q;
-        let near_density = density * one_minus_q;
-
-        let pressure = k * (density - rho0);
-        let near_pressure = k_near * near_density;
-
-        let D_term = dt_sqr * (pressure * one_minus_q + near_pressure * one_minus_q * one_minus_q);
-
-        // clamp the pairwise correction magnitude (safety)
-        let D_term_clamped = clampD(D_term, maxD);
-
-        let nx = rx * invDist;
-        let ny = ry * invDist;
-
-        let Dx = nx * D_term_clamped;
-        let Dy = ny * D_term_clamped;
-
-        let halfDx = 0.5 * Dx;
-        let halfDy = 0.5 * Dy;
-
-        // convert to fixed-point and atomically add
-        atomicAdd(&disp[i].dx, toFixed(-halfDx, SCALE));
-        atomicAdd(&disp[i].dy, toFixed(-halfDy, SCALE));
-        atomicAdd(&disp[j].dx, toFixed(halfDx, SCALE));
-        atomicAdd(&disp[j].dy, toFixed(halfDy, SCALE));
-        }
-    }
-    }
-
+      struct Params { a : vec4<f32>, b : vec4<f32>, c : vec4<f32> };
+      @group(0) @binding(0) var<uniform> params : Params;
+  
+      struct Particle { x : f32, y : f32, vx : f32, vy : f32, pX : f32, pY : f32, pad0 : f32, pad1 : f32 };
+      @group(0) @binding(1) var<storage, read> particles : array<Particle>;
+  
+      struct Disp { dx : atomic<i32>, dy : atomic<i32> };
+      @group(0) @binding(2) var<storage, read_write> disp : array<Disp>;
+  
+      // truncate float->i32 fixed-point conversion
+      fn toFixed(v: f32, scale: f32) -> i32 {
+      return i32(v * scale);
+      }
+  
+      // optional clamp helper to avoid insanely large D_term contributions
+      fn clampD(v: f32, maxVal: f32) -> f32 {
+      return clamp(v, -maxVal, maxVal);
+      }
+  
+      @compute @workgroup_size(256)
+      fn main(@builtin(global_invocation_id) id : vec3<u32>) {
+      let i = id.x;
+      let count = u32(params.c.x);
+      if (i >= count) { return; }
+  
+      let px = particles[i].x;
+      let py = particles[i].y;
+  
+      let h = params.b.x;
+      let k = params.b.z;
+      let k_near = params.b.w;
+      let dt_sqr = params.a.w;
+      let rho0 = params.b.y;
+      let SCALE = params.c.y;
+  
+      let h2 = h * h;
+      // clamp per-pair D_term magnitude to avoid overflow (in world units)
+      let maxD = 0.5 * h; // reasonable limit for single-pair D_term
+  
+      for (var j: u32 = 0u; j < count; j = j + 1u) {
+          if (j == i) { continue; }
+  
+          let qx = particles[j].x;
+          let qy = particles[j].y;
+  
+          let rx = qx - px; // i -> j
+          let ry = qy - py;
+          let dist2 = rx*rx + ry*ry;
+  
+          if (dist2 < h2 && dist2 > 1e-10) {
+          // use inverseSqrt + multiply to avoid explicit sqrt()
+          let invDist = inverseSqrt(dist2);    // 1 / sqrt(dist2)
+          let dist = dist2 * invDist;          // sqrt(dist2) == dist2 * (1/sqrt(dist2))
+          let q = dist / h;
+          let one_minus_q = 1.0 - q;
+  
+          let density = one_minus_q * one_minus_q;
+          let near_density = density * one_minus_q;
+  
+          let pressure = k * (density - rho0);
+          let near_pressure = k_near * near_density;
+  
+          let D_term = dt_sqr * (pressure * one_minus_q + near_pressure * one_minus_q * one_minus_q);
+  
+          // clamp the pairwise correction magnitude (safety)
+          let D_term_clamped = clampD(D_term, maxD);
+  
+          let nx = rx * invDist;
+          let ny = ry * invDist;
+  
+          let Dx = nx * D_term_clamped;
+          let Dy = ny * D_term_clamped;
+  
+          let halfDx = 0.5 * Dx;
+          let halfDy = 0.5 * Dy;
+  
+          // convert to fixed-point and atomically add
+          atomicAdd(&disp[i].dx, toFixed(-halfDx, SCALE));
+          atomicAdd(&disp[i].dy, toFixed(-halfDy, SCALE));
+          atomicAdd(&disp[j].dx, toFixed(halfDx, SCALE));
+          atomicAdd(&disp[j].dy, toFixed(halfDy, SCALE));
+          }
+      }
+      }
     `;
 
     // apply displacements: load atomics, convert back to float, apply to particles, clear atomics
     const applyDispWGSL = `
-    struct Params { a : vec4<f32>, b : vec4<f32>, c : vec4<f32> };
-    @group(0) @binding(0) var<uniform> params : Params;
-
-    struct Particle { x : f32, y : f32, vx : f32, vy : f32, pX : f32, pY : f32, pad0 : f32, pad1 : f32 };
-    @group(0) @binding(1) var<storage, read_write> particles : array<Particle>;
-
-    struct Disp { dx : atomic<i32>, dy : atomic<i32> };
-    @group(0) @binding(2) var<storage, read_write> disp : array<Disp>;
-
-    fn fromFixed(v: i32, scale: f32) -> f32 {
-    return f32(v) / scale;
-    }
-
-    @compute @workgroup_size(${workgroupSize})
-    fn main(@builtin(global_invocation_id) id : vec3<u32>) {
-    let i = id.x;
-    let count = u32(params.c.x);
-    if (i >= count) { return; }
-
-    let SCALE = params.c.y;
-
-    let ix = atomicLoad(&disp[i].dx);
-    let iy = atomicLoad(&disp[i].dy);
-
-    let fx = fromFixed(ix, SCALE);
-    let fy = fromFixed(iy, SCALE);
-
-    particles[i].x = particles[i].x + fx;
-    particles[i].y = particles[i].y + fy;
-
-    // clear for next frame
-    atomicStore(&disp[i].dx, 0);
-    atomicStore(&disp[i].dy, 0);
-    }
+      struct Params { a : vec4<f32>, b : vec4<f32>, c : vec4<f32> };
+      @group(0) @binding(0) var<uniform> params : Params;
+  
+      struct Particle { x : f32, y : f32, vx : f32, vy : f32, pX : f32, pY : f32, pad0 : f32, pad1 : f32 };
+      @group(0) @binding(1) var<storage, read_write> particles : array<Particle>;
+  
+      struct Disp { dx : atomic<i32>, dy : atomic<i32> };
+      @group(0) @binding(2) var<storage, read_write> disp : array<Disp>;
+  
+      fn fromFixed(v: i32, scale: f32) -> f32 {
+      return f32(v) / scale;
+      }
+  
+      @compute @workgroup_size(${workgroupSize})
+      fn main(@builtin(global_invocation_id) id : vec3<u32>) {
+      let i = id.x;
+      let count = u32(params.c.x);
+      if (i >= count) { return; }
+  
+      let SCALE = params.c.y;
+  
+      let ix = atomicLoad(&disp[i].dx);
+      let iy = atomicLoad(&disp[i].dy);
+  
+      let fx = fromFixed(ix, SCALE);
+      let fy = fromFixed(iy, SCALE);
+  
+      particles[i].x = particles[i].x + fx;
+      particles[i].y = particles[i].y + fy;
+  
+      // clear for next frame
+      atomicStore(&disp[i].dx, 0);
+      atomicStore(&disp[i].dy, 0);
+      }
     `;
 
     // boundary pass
     const applyBoundaryWGSL = `
-    struct Params { a : vec4<f32>, b : vec4<f32>, c : vec4<f32> };
-    @group(0) @binding(0) var<uniform> params : Params;
-    struct Particle { x : f32, y : f32, vx : f32, vy : f32, pX : f32, pY : f32, pad0 : f32, pad1 : f32 };
-    @group(0) @binding(1) var<storage, read_write> particles : array<Particle>;
-
-    @compute @workgroup_size(${workgroupSize})
-    fn main(@builtin(global_invocation_id) id : vec3<u32>) {
-    let i = id.x;
-    let count = u32(params.c.x);
-    if (i >= count) { return; }
-    var px = particles[i].x;
-    var py = particles[i].y;
-    var vx = particles[i].vx;
-    var vy = particles[i].vy;
-
-    if (px < -1.0) { px = -1.0; vx = vx; }
-    if (px >  1.0) { px =  1.0; vx = vx; }
-    if (py < -1.0) { py = -1.0; vy = vy; }
-    if (py >  1.0) { py =  1.0; vy = vy; }
-
-    particles[i].x = px;
-    particles[i].y = py;
-    particles[i].vx = vx;
-    particles[i].vy = vy;
-    }
+      struct Params { a : vec4<f32>, b : vec4<f32>, c : vec4<f32> };
+      @group(0) @binding(0) var<uniform> params : Params;
+      struct Particle { x : f32, y : f32, vx : f32, vy : f32, pX : f32, pY : f32, pad0 : f32, pad1 : f32 };
+      @group(0) @binding(1) var<storage, read_write> particles : array<Particle>;
+  
+      @compute @workgroup_size(${workgroupSize})
+      fn main(@builtin(global_invocation_id) id : vec3<u32>) {
+      let i = id.x;
+      let count = u32(params.c.x);
+      if (i >= count) { return; }
+      var px = particles[i].x;
+      var py = particles[i].y;
+      var vx = particles[i].vx;
+      var vy = particles[i].vy;
+  
+      if (px < -1.0) { px = -1.0; vx = vx; }
+      if (px >  1.0) { px =  1.0; vx = vx; }
+      if (py < -1.0) { py = -1.0; vy = vy; }
+      if (py >  1.0) { py =  1.0; vy = vy; }
+  
+      particles[i].x = px;
+      particles[i].y = py;
+      particles[i].vx = vx;
+      particles[i].vy = vy;
+      }
     `;
 
     // update velocity from positions
     const updateVelWGSL = `
-    struct Params { a : vec4<f32>, b : vec4<f32>, c : vec4<f32> };
-    @group(0) @binding(0) var<uniform> params : Params;
-    struct Particle { x : f32, y : f32, vx : f32, vy : f32, pX : f32, pY : f32, pad0 : f32, pad1 : f32 };
-    @group(0) @binding(1) var<storage, read_write> particles : array<Particle>;
-
-    @compute @workgroup_size(${workgroupSize})
-    fn main(@builtin(global_invocation_id) id : vec3<u32>) {
-    let i = id.x;
-    let count = u32(params.c.x);
-    if (i >= count) { return; }
-    let dt = params.a.x;
-    let px = particles[i].x;
-    let py = particles[i].y;
-    let pdx = particles[i].pX;
-    let pdy = particles[i].pY;
-    particles[i].vx = (px - pdx) / dt;
-    particles[i].vy = (py - pdy) / dt;
-    }
+      struct Params { a : vec4<f32>, b : vec4<f32>, c : vec4<f32> };
+      @group(0) @binding(0) var<uniform> params : Params;
+      struct Particle { x : f32, y : f32, vx : f32, vy : f32, pX : f32, pY : f32, pad0 : f32, pad1 : f32 };
+      @group(0) @binding(1) var<storage, read_write> particles : array<Particle>;
+  
+      @compute @workgroup_size(${workgroupSize})
+      fn main(@builtin(global_invocation_id) id : vec3<u32>) {
+      let i = id.x;
+      let count = u32(params.c.x);
+      if (i >= count) { return; }
+      let dt = params.a.x;
+      let px = particles[i].x;
+      let py = particles[i].y;
+      let pdx = particles[i].pX;
+      let pdy = particles[i].pY;
+      particles[i].vx = (px - pdx) / dt;
+      particles[i].vy = (py - pdy) / dt;
+      }
     `;
 
     // simple render shaders: use binding 0 for particles (separate layout)
     const vsWGSL = `
-    struct Particle { x : f32, y : f32, vx : f32, vy : f32, pX : f32, pY : f32, pad0 : f32, pad1 : f32 };
-    @group(0) @binding(0) var<storage, read> particles : array<Particle>;
-    struct VSOut { @builtin(position) pos : vec4<f32>, @location(0) color : vec4<f32> };
-    @vertex fn vs_main(@builtin(vertex_index) idx : u32) -> VSOut {
-    let pIndex = idx / 3u;
-    let corner = idx % 3u;
-    let px = particles[pIndex].x;
-    let py = particles[pIndex].y;
-    var offset: vec2<f32>;
-    if (corner == 0u) { offset = vec2<f32>(-0.006,  0.006); }
-    else if (corner == 1u) { offset = vec2<f32>( 0.006, 0.0); }
-    else { offset = vec2<f32>(-0.006, -0.006); }
-    var out: VSOut;
-    out.pos = vec4<f32>(px + offset.x, py + offset.y, 0.0, 1.0);
-    out.color = vec4<f32>(0.2, 0.45, 0.9, 1.0);
-    return out;
-    }
+      struct Particle { x : f32, y : f32, vx : f32, vy : f32, pX : f32, pY : f32, pad0 : f32, pad1 : f32 };
+      @group(0) @binding(0) var<storage, read> particles : array<Particle>;
+      struct VSOut { @builtin(position) pos : vec4<f32>, @location(0) color : vec4<f32> };
+      @vertex fn vs_main(@builtin(vertex_index) idx : u32) -> VSOut {
+      let pIndex = idx / 3u;
+      let corner = idx % 3u;
+      let px = particles[pIndex].x;
+      let py = particles[pIndex].y;
+      var offset: vec2<f32>;
+      if (corner == 0u) { offset = vec2<f32>(-0.006,  0.006); }
+      else if (corner == 1u) { offset = vec2<f32>( 0.006, 0.0); }
+      else { offset = vec2<f32>(-0.006, -0.006); }
+      var out: VSOut;
+      out.pos = vec4<f32>(px + offset.x, py + offset.y, 0.0, 1.0);
+      out.color = vec4<f32>(0.2, 0.45, 0.9, 1.0);
+      return out;
+      }
     `;
     const fsWGSL = `
-    @fragment fn fs_main(@location(0) color : vec4<f32>) -> @location(0) vec4<f32> { return color; }
+      @fragment fn fs_main(@location(0) color : vec4<f32>) -> @location(0) vec4<f32> { return color; }
     `;
 
     // PIPELINES
@@ -601,7 +600,7 @@
         const avg = formatFPS(fpsInfo.avgFps);
         // show ms/frame too (smoothed)
         const avgMs = fpsInfo.avgMs.toFixed(2);
-        infoEl.textContent = `COMPUTE FLUID | frames: ${frameCount}  |  FPS:  ${avgMs} ms/frame`;
+        infoEl.textContent = `COMPUTE FLUID | frames: ${frameCount}  |  FPS:  ${avgMs} ms/frame | Leke Ayeko`;
     }
 
     requestAnimationFrame(frame);
