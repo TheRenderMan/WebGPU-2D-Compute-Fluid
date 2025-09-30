@@ -1,5 +1,6 @@
 # 2D Particle-based Fluid Simulation using WebGPU and WGSL's Compute Shaders
 Crude implementation of 2d particle-based fluid simulation using WebGPU and WGSL's compute shaders.
+Run live [demo](https://therenderman.github.io/WebGPU-2D-Compute-Fluid/) in your browser!
 
 ## Insight
 I wrote this compact 2d fluid simulation so that I could learn how to write GPU programs (simulations and rendering programs) using WebGPU and WGSL's compute.
