@@ -1,4 +1,4 @@
-# 2D Particle-based Fluid Simulation in WebGPU and WGSL's Compute Shaders
+# 2D Particle-based Fluid Simulation using WebGPU and WGSL's Compute Shaders
 Crude implementation of 2d particle-based fluid simulation using WebGPU and WGSL's compute shaders.
 
 ## Insight
