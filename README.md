@@ -11,6 +11,4 @@ The computation complexity of the fluid engine is 0(N)*(N), but can be furthered
 But currently, each particle is querying all other fluid particles to determine its neighbors.
 Even for 5000 particles, *22,500,000* density relax computations are being processed per-frame (excluding other physics computations) and the simulation still runs in real-time.
 
-
-## Disclaimer!
-This is entirely a learning project, so the implementation may contain some redundancies or bad practices. The project is nowhere near R&D and never aimed to be, but it just serves as a major milestone in my learning experience of the WebGPU API and WGSL.
+positionosition
