@@ -54,10 +54,10 @@
     let dt = 0.006;                // time-step
     const gravity = [0.0, -3.8];   // gravity
     let dt_sqr = dt * dt;          // used in density relaxation
-    let h = .22 * .22;             // neighbbor query radius
-    let rho0 = .0000001;            // rest density
-    let k = 13;                    // repulsion
-    let k_near = 14;               // repulsion for near particles
+    let h = .235 * .235;             // neighbbor query radius
+    let rho0 = .000001;           // rest density
+    let k = 11;                    // repulsion
+    let k_near = 12;               // repulsion for near particles
 
     // Fixed-point scale for atomic accumulation (atomic<i32>)
     const SCALE = 100000.0; // tune for precision/overflow (1e5 is typical)
